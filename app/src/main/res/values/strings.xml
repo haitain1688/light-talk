@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">灯语助手</string>
+    <string name="notification_channel_name">灯光任务</string>
+    <string name="notification_channel_description">用于保持闪灯和灯语任务持续运行</string>
+    <string name="notification_title">灯语助手运行中</string>
+    <string name="notification_text">正在执行闪灯或灯语任务</string>
+</resources>
