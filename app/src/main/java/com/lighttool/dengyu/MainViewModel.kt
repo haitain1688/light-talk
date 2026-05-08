@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.lighttool.dengyu.data.AppPage
 import com.lighttool.dengyu.data.LampUiState
 import com.lighttool.dengyu.data.MessageMode
+import com.lighttool.dengyu.data.ReaderHistoryItem
 import com.lighttool.dengyu.reader.CenterLightSample
 import com.lighttool.dengyu.reader.LightSignalDecoder
 import com.lighttool.dengyu.service.PatternCodec
@@ -22,6 +23,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -32,7 +35,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var patternStatusJob: Job? = null
     private val patternLoopGapMs = 1500L
     private val readerTransitionHoldMs = 90L
+    private val readerAutoStopDarkMs = 2200L
+    private val readerHistoryLimit = 12
     private var readerDecoder = createReaderDecoder(200f, 600f, 200f, 700f)
+    private val readerTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
 
     private val _uiState = MutableStateFlow(
         LampUiState(
@@ -49,6 +55,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastReaderUiSampleMs = 0L
     private var pendingReaderLevel = false
     private var pendingReaderLevelSinceMs = 0L
+    private var lastReaderSignalTimestampMs = 0L
 
     init {
         readerDecoder = createReaderDecoder(
@@ -152,30 +159,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startReadingLight() {
-        resetReaderDecoder(clearUi = true)
+        startReadingSession(autoStarted = false)
+    }
+
+    fun setReaderAutoStart(enabled: Boolean) {
         _uiState.update {
             it.copy(
-                currentPage = AppPage.READER,
                 readerState = it.readerState.copy(
-                    isReading = true,
-                    guideMessage = "读取中，请保持光源位于取景框中央"
+                    autoStartEnabled = enabled,
+                    guideMessage = if (enabled) {
+                        "自动开始已开启，检测到稳定光源后会自动进入读取"
+                    } else {
+                        "自动开始已关闭，请手动点击开始读取"
+                    }
                 ),
-                statusMessage = "读灯语模式已启动"
+                statusMessage = if (enabled) "已开启自动开始识别" else "已关闭自动开始识别"
+            )
+        }
+    }
+
+    fun clearReaderHistory() {
+        _uiState.update {
+            it.copy(
+                readerState = it.readerState.copy(
+                    history = emptyList(),
+                    guideMessage = "历史记录已清空"
+                ),
+                statusMessage = "读灯历史记录已清空"
             )
         }
     }
 
     fun stopReadingLight() {
-        _uiState.update {
-            it.copy(
-                readerState = it.readerState.copy(
-                    isReading = false,
-                    currentPulseMs = 0L,
-                    guideMessage = "读取已停止，可重新开始或保留当前结果"
-                ),
-                statusMessage = "读灯语模式已停止"
-            )
-        }
+        stopReadingSession(
+            reason = "读灯语模式已停止",
+            guide = "读取已停止，可重新开始或保留当前结果",
+            saveHistory = true
+        )
     }
 
     fun clearReaderResult() {
@@ -183,6 +203,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 readerState = it.readerState.copy(
+                    isReading = false,
                     guideMessage = "结果已清空，请把光源对准取景框后重新开始"
                 ),
                 statusMessage = "读灯语结果已清空"
@@ -194,27 +215,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         val threshold = state.readerState.detectionThreshold
         val lightDetected = stabilizeReaderLevel(sample.signalStrength, threshold, sample.timestampMs)
-        val shouldUpdateUi = sample.timestampMs - lastReaderUiSampleMs >= 80L ||
-            lightDetected != lastReaderLightDetected
+        val isReading = maybeAutoStartReading(state, lightDetected, sample.timestampMs)
+        if (lightDetected) {
+            lastReaderSignalTimestampMs = sample.timestampMs
+        }
 
-        var symbols = state.readerState.decodedSymbols
-        var message = state.readerState.decodedMessage
-        var pulseMs = if (lightDetected) state.readerState.currentPulseMs else 0L
-        if (state.readerState.isReading) {
+        var symbols = _uiState.value.readerState.decodedSymbols
+        var message = _uiState.value.readerState.decodedMessage
+        var pulseMs = if (lightDetected) _uiState.value.readerState.currentPulseMs else 0L
+        if (isReading) {
             val snapshot = readerDecoder.onSample(lightDetected, sample.timestampMs)
             symbols = snapshot.symbols
             message = snapshot.message
             pulseMs = snapshot.currentPulseMs
         }
 
+        val shouldAutoFinish = isReading &&
+            !lightDetected &&
+            symbols.isNotBlank() &&
+            sample.timestampMs - lastReaderSignalTimestampMs >= readerAutoStopDarkMs
+
+        if (shouldAutoFinish) {
+            val completed = readerDecoder.complete(sample.timestampMs)
+            symbols = completed.symbols
+            message = completed.message
+            pulseMs = 0L
+            appendReaderHistory(completed.symbols, completed.message)
+            _uiState.update {
+                it.copy(
+                    readerState = it.readerState.copy(
+                        isReading = false,
+                        decodedSymbols = completed.symbols,
+                        decodedMessage = completed.message,
+                        currentPulseMs = 0L,
+                        guideMessage = "本次读取已自动完成，结果已保存到历史记录"
+                    ),
+                    statusMessage = "读灯语自动识别完成"
+                )
+            }
+            resetReaderDecoder(clearUi = false)
+        }
+
+        val shouldUpdateUi = sample.timestampMs - lastReaderUiSampleMs >= 80L ||
+            lightDetected != lastReaderLightDetected ||
+            shouldAutoFinish
+
         if (shouldUpdateUi || _uiState.value.readerState.isReading) {
             _uiState.update {
                 val guide = when {
-                    !_uiState.value.readerState.isReading -> "先观察信号强度和建议阈值，确认稳定后再开始读取"
+                    shouldAutoFinish -> "本次读取已自动完成，结果已保存到历史记录"
+                    !it.readerState.isReading && it.readerState.autoStartEnabled && lightDetected ->
+                        "已检测到稳定光源，自动开始识别中"
+                    !it.readerState.isReading && it.readerState.autoStartEnabled ->
+                        "自动开始已开启，检测到稳定光源后会自动进入读取"
+                    !it.readerState.isReading -> "自动开始已关闭，请手动点击开始读取"
                     lightDetected -> "已稳定捕获亮灯信号，继续保持对准"
                     symbols.isBlank() && sample.signalStrength < sample.suggestedThreshold -> "光源偏弱，可把光源靠近或点自动校准"
                     symbols.isBlank() -> "等待下一次亮灯"
-                    else -> "已读取到灯语，继续保持稳定直到结束"
+                    else -> "已读取到灯语，继续保持稳定直到自动完成"
                 }
                 it.copy(
                     readerState = it.readerState.copy(
@@ -483,6 +541,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun startReadingSession(autoStarted: Boolean) {
+        resetReaderDecoder(clearUi = true)
+        _uiState.update {
+            it.copy(
+                currentPage = AppPage.READER,
+                readerState = it.readerState.copy(
+                    isReading = true,
+                    guideMessage = if (autoStarted) {
+                        "已检测到稳定光源，自动开始识别中"
+                    } else {
+                        "读取中，请保持光源位于取景框中央"
+                    }
+                ),
+                statusMessage = if (autoStarted) "已自动开始读灯语识别" else "读灯语模式已启动"
+            )
+        }
+    }
+
+    private fun stopReadingSession(
+        reason: String,
+        guide: String,
+        saveHistory: Boolean
+    ) {
+        val snapshot = readerDecoder.complete(System.currentTimeMillis())
+        if (saveHistory) {
+            appendReaderHistory(snapshot.symbols, snapshot.message)
+        }
+        _uiState.update {
+            it.copy(
+                readerState = it.readerState.copy(
+                    isReading = false,
+                    decodedSymbols = snapshot.symbols.ifBlank { it.readerState.decodedSymbols },
+                    decodedMessage = snapshot.message.ifBlank { it.readerState.decodedMessage },
+                    currentPulseMs = 0L,
+                    guideMessage = guide
+                ),
+                statusMessage = reason
+            )
+        }
+        resetReaderDecoder(clearUi = false)
+    }
+
+    private fun maybeAutoStartReading(
+        state: LampUiState,
+        lightDetected: Boolean,
+        timestampMs: Long
+    ): Boolean {
+        if (!state.readerState.isReading && state.readerState.autoStartEnabled && lightDetected) {
+            lastReaderSignalTimestampMs = timestampMs
+            startReadingSession(autoStarted = true)
+            return true
+        }
+        return _uiState.value.readerState.isReading
+    }
+
+    private fun appendReaderHistory(symbols: String, message: String) {
+        if (symbols.isBlank() && message.isBlank()) {
+            return
+        }
+        _uiState.update {
+            val item = ReaderHistoryItem(
+                id = System.currentTimeMillis(),
+                timeLabel = LocalDateTime.now().format(readerTimeFormatter),
+                symbols = symbols.ifBlank { "-" },
+                message = message.ifBlank { "未翻译出文本" }
+            )
+            val updated = listOf(item) + it.readerState.history
+            it.copy(
+                readerState = it.readerState.copy(
+                    history = updated.distinctBy { history -> history.symbols + "|" + history.message }
+                        .take(readerHistoryLimit)
+                )
+            )
+        }
+    }
+
     private fun resetReaderDecoder(clearUi: Boolean = false) {
         readerDecoder = createReaderDecoder(
             _uiState.value.shortOnMs,
@@ -495,6 +629,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         lastReaderUiSampleMs = 0L
         pendingReaderLevel = false
         pendingReaderLevelSinceMs = 0L
+        lastReaderSignalTimestampMs = 0L
         if (clearUi) {
             _uiState.update {
                 it.copy(

@@ -20,8 +20,16 @@ enum class AppPage {
     READER
 }
 
+data class ReaderHistoryItem(
+    val id: Long,
+    val timeLabel: String,
+    val symbols: String,
+    val message: String
+)
+
 data class ReaderUiState(
     val isReading: Boolean = false,
+    val autoStartEnabled: Boolean = true,
     val signalStrength: Float = 0f,
     val centerBrightness: Float = 0f,
     val surroundBrightness: Float = 0f,
@@ -32,7 +40,8 @@ data class ReaderUiState(
     val decodedSymbols: String = "",
     val decodedMessage: String = "",
     val guideMessage: String = "将光源对准取景框，先观察信号强度，再开始读取",
-    val currentPulseMs: Long = 0L
+    val currentPulseMs: Long = 0L,
+    val history: List<ReaderHistoryItem> = emptyList()
 )
 
 data class LampUiState(

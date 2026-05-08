@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -74,6 +75,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.lighttool.dengyu.data.AppPage
 import com.lighttool.dengyu.data.LampUiState
 import com.lighttool.dengyu.data.MessageMode
+import com.lighttool.dengyu.data.ReaderHistoryItem
 import com.lighttool.dengyu.reader.CenterLightAnalyzer
 import com.lighttool.dengyu.reader.CenterLightSample
 import com.lighttool.dengyu.ui.theme.LightSignalTheme
@@ -114,9 +116,11 @@ class MainActivity : ComponentActivity() {
                             onStopTorchNow = viewModel::stopTorchNow,
                             onReaderThresholdChange = viewModel::setReaderThreshold,
                             onApplySuggestedReaderThreshold = viewModel::applySuggestedReaderThreshold,
+                            onReaderAutoStartChange = viewModel::setReaderAutoStart,
                             onReaderStart = viewModel::startReadingLight,
                             onReaderStop = viewModel::stopReadingLight,
                             onReaderClear = viewModel::clearReaderResult,
+                            onReaderClearHistory = viewModel::clearReaderHistory,
                             onReaderSample = viewModel::onReaderSample
                         )
                     }
@@ -167,9 +171,11 @@ private fun LampScreen(
     onStopTorchNow: () -> Unit,
     onReaderThresholdChange: (Float) -> Unit,
     onApplySuggestedReaderThreshold: () -> Unit,
+    onReaderAutoStartChange: (Boolean) -> Unit,
     onReaderStart: () -> Unit,
     onReaderStop: () -> Unit,
     onReaderClear: () -> Unit,
+    onReaderClearHistory: () -> Unit,
     onReaderSample: (CenterLightSample) -> Unit
 ) {
     Column(
@@ -223,9 +229,11 @@ private fun LampScreen(
                 state = state,
                 onReaderThresholdChange = onReaderThresholdChange,
                 onApplySuggestedReaderThreshold = onApplySuggestedReaderThreshold,
+                onReaderAutoStartChange = onReaderAutoStartChange,
                 onReaderStart = onReaderStart,
                 onReaderStop = onReaderStop,
                 onReaderClear = onReaderClear,
+                onReaderClearHistory = onReaderClearHistory,
                 onReaderSample = onReaderSample
             )
         }
@@ -288,9 +296,11 @@ private fun ReaderCard(
     state: LampUiState,
     onReaderThresholdChange: (Float) -> Unit,
     onApplySuggestedReaderThreshold: () -> Unit,
+    onReaderAutoStartChange: (Boolean) -> Unit,
     onReaderStart: () -> Unit,
     onReaderStop: () -> Unit,
     onReaderClear: () -> Unit,
+    onReaderClearHistory: () -> Unit,
     onReaderSample: (CenterLightSample) -> Unit
 ) {
     val readerState = state.readerState
@@ -314,6 +324,29 @@ private fun ReaderCard(
         )
         Spacer(modifier = Modifier.height(14.dp))
         PreviewPanel(title = "读取提示", text = readerState.guideMessage)
+        Spacer(modifier = Modifier.height(14.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("自动开始识别", color = Color(0xFF102033), fontWeight = FontWeight.Medium)
+                Text(
+                    text = if (readerState.autoStartEnabled) {
+                        "检测到稳定光源后会自动进入读取"
+                    } else {
+                        "关闭后需要手动点击开始读取"
+                    },
+                    color = Color(0xFF58677F)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Switch(
+                checked = readerState.autoStartEnabled,
+                onCheckedChange = onReaderAutoStartChange
+            )
+        }
         Spacer(modifier = Modifier.height(14.dp))
         Text(
             text = "识别阈值 ${readerState.detectionThreshold.toInt()}",
@@ -361,6 +394,59 @@ private fun ReaderCard(
                 Text("清空结果")
             }
         }
+        Spacer(modifier = Modifier.height(14.dp))
+        ReaderHistorySection(
+            history = readerState.history,
+            onClearHistory = onReaderClearHistory
+        )
+    }
+}
+
+@Composable
+private fun ReaderHistorySection(
+    history: List<ReaderHistoryItem>,
+    onClearHistory: () -> Unit
+) {
+    HorizontalDivider(color = DividerDefaults.color.copy(alpha = 0.5f))
+    Spacer(modifier = Modifier.height(14.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("读取历史", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF102033))
+        if (history.isNotEmpty()) {
+            SecondaryButton(onClick = onClearHistory, modifier = Modifier.width(132.dp)) {
+                Text("清空历史")
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+    if (history.isEmpty()) {
+        Text("暂无历史记录，完成一次读灯后会自动保存到这里。", color = Color(0xFF58677F))
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            history.forEach { item ->
+                HistoryItemCard(item)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryItemCard(item: ReaderHistoryItem) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFFF4F8FD))
+            .padding(14.dp)
+    ) {
+        Text(item.timeLabel, color = Color(0xFF5B6B82), fontSize = 13.sp)
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(item.symbols, color = Color(0xFF122033), fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(item.message, color = Color(0xFF3B4C62))
     }
 }
 

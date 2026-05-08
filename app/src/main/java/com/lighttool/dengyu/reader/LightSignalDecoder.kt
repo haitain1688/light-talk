@@ -68,6 +68,11 @@ class LightSignalDecoder(
         return snapshot(timestampMs)
     }
 
+    fun complete(timestampMs: Long): DecodeSnapshot {
+        finalizeCurrentToken()
+        return snapshot(timestampMs)
+    }
+
     private fun appendPulse(durationMs: Long) {
         currentToken.append(if (durationMs < dotDashBoundaryMs) '.' else '-')
     }
