@@ -5,14 +5,22 @@ import androidx.camera.core.ImageProxy
 
 data class CenterLightSample(
     val centerBrightness: Float,
-    val frameBrightness: Float,
+    val surroundBrightness: Float,
     val signalStrength: Float,
+    val noiseFloor: Float,
+    val suggestedThreshold: Float,
     val timestampMs: Long
 )
 
 class CenterLightAnalyzer(
     private val onSample: (CenterLightSample) -> Unit
 ) : ImageAnalysis.Analyzer {
+
+    private var hasBaseline = false
+    private var smoothedCenter = 0f
+    private var smoothedSurround = 0f
+    private var smoothedSignal = 0f
+    private var noiseFloor = 8f
 
     override fun analyze(image: ImageProxy) {
         val plane = image.planes.firstOrNull()
@@ -27,43 +35,77 @@ class CenterLightAnalyzer(
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
 
-        val fullAverage = averageLuma(
+        val focusStartX = (width * 0.18f).toInt()
+        val focusEndX = (width * 0.82f).toInt()
+        val focusStartY = (height * 0.18f).toInt()
+        val focusEndY = (height * 0.82f).toInt()
+        val centerStartX = (width * 0.35f).toInt()
+        val centerEndX = (width * 0.65f).toInt()
+        val centerStartY = (height * 0.35f).toInt()
+        val centerEndY = (height * 0.65f).toInt()
+
+        val centerStats = averageLumaStats(
             buffer = buffer,
             width = width,
             height = height,
             rowStride = rowStride,
             pixelStride = pixelStride,
-            startX = 0,
-            endX = width,
-            startY = 0,
-            endY = height,
-            step = 8
-        )
-        val centerAverage = averageLuma(
-            buffer = buffer,
-            width = width,
-            height = height,
-            rowStride = rowStride,
-            pixelStride = pixelStride,
-            startX = (width * 0.35f).toInt(),
-            endX = (width * 0.65f).toInt(),
-            startY = (height * 0.35f).toInt(),
-            endY = (height * 0.65f).toInt(),
+            startX = centerStartX,
+            endX = centerEndX,
+            startY = centerStartY,
+            endY = centerEndY,
             step = 3
         )
+        val focusStats = averageLumaStats(
+            buffer = buffer,
+            width = width,
+            height = height,
+            rowStride = rowStride,
+            pixelStride = pixelStride,
+            startX = focusStartX,
+            endX = focusEndX,
+            startY = focusStartY,
+            endY = focusEndY,
+            step = 4
+        )
+
+        val surroundAverage = if (focusStats.count > centerStats.count) {
+            ((focusStats.sum - centerStats.sum).toFloat() / (focusStats.count - centerStats.count).toFloat())
+        } else {
+            centerStats.average
+        }
+        val centerAverage = centerStats.average
+        val rawSignal = centerAverage - surroundAverage
+
+        if (!hasBaseline) {
+            hasBaseline = true
+            smoothedCenter = centerAverage
+            smoothedSurround = surroundAverage
+            smoothedSignal = rawSignal
+        } else {
+            smoothedCenter = smoothedCenter * 0.78f + centerAverage * 0.22f
+            smoothedSurround = smoothedSurround * 0.82f + surroundAverage * 0.18f
+            smoothedSignal = smoothedSignal * 0.70f + rawSignal * 0.30f
+        }
+
+        val deviation = kotlin.math.abs(rawSignal - smoothedSignal)
+        noiseFloor = noiseFloor * 0.90f + deviation * 0.10f
+        val suggestedThreshold = (noiseFloor * 2.8f).coerceIn(8f, 60f)
 
         onSample(
             CenterLightSample(
-                centerBrightness = centerAverage,
-                frameBrightness = fullAverage,
-                signalStrength = centerAverage - fullAverage,
+                centerBrightness = smoothedCenter,
+                surroundBrightness = smoothedSurround,
+                signalStrength = smoothedSignal,
+                noiseFloor = noiseFloor,
+                suggestedThreshold = suggestedThreshold,
                 timestampMs = image.imageInfo.timestamp / 1_000_000L
             )
         )
         image.close()
     }
 
-    private fun averageLuma(
+    private fun averageLumaStats(
         buffer: java.nio.ByteBuffer,
         width: Int,
         height: Int,
@@ -74,7 +116,7 @@ class CenterLightAnalyzer(
         startY: Int,
         endY: Int,
         step: Int
-    ): Float {
+    ): LumaStats {
         var sum = 0L
         var count = 0L
         val safeStartX = startX.coerceIn(0, width - 1)
@@ -93,6 +135,16 @@ class CenterLightAnalyzer(
             }
             y += step
         }
-        return if (count == 0L) 0f else sum.toFloat() / count.toFloat()
+        return LumaStats(
+            sum = sum,
+            count = count,
+            average = if (count == 0L) 0f else sum.toFloat() / count.toFloat()
+        )
     }
+
+    private data class LumaStats(
+        val sum: Long,
+        val count: Long,
+        val average: Float
+    )
 }

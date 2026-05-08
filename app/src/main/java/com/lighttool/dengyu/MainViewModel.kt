@@ -31,6 +31,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var autoOffCountdownJob: Job? = null
     private var patternStatusJob: Job? = null
     private val patternLoopGapMs = 1500L
+    private val readerTransitionHoldMs = 90L
     private var readerDecoder = createReaderDecoder(200f, 600f, 200f, 700f)
 
     private val _uiState = MutableStateFlow(
@@ -46,6 +47,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<LampUiState> = _uiState.asStateFlow()
     private var lastReaderLightDetected = false
     private var lastReaderUiSampleMs = 0L
+    private var pendingReaderLevel = false
+    private var pendingReaderLevelSinceMs = 0L
 
     init {
         readerDecoder = createReaderDecoder(
@@ -138,6 +141,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun applySuggestedReaderThreshold() {
+        _uiState.update {
+            val suggested = it.readerState.suggestedThreshold.coerceIn(6f, 60f)
+            it.copy(
+                readerState = it.readerState.copy(detectionThreshold = suggested),
+                statusMessage = "已按当前环境自动校准识别阈值"
+            )
+        }
+    }
+
     fun startReadingLight() {
         resetReaderDecoder(clearUi = true)
         _uiState.update {
@@ -178,15 +191,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onReaderSample(sample: CenterLightSample) {
-        val threshold = _uiState.value.readerState.detectionThreshold
-        val lightDetected = sample.signalStrength >= threshold
+        val state = _uiState.value
+        val threshold = state.readerState.detectionThreshold
+        val lightDetected = stabilizeReaderLevel(sample.signalStrength, threshold, sample.timestampMs)
         val shouldUpdateUi = sample.timestampMs - lastReaderUiSampleMs >= 80L ||
             lightDetected != lastReaderLightDetected
 
-        var symbols = _uiState.value.readerState.decodedSymbols
-        var message = _uiState.value.readerState.decodedMessage
-        var pulseMs = if (lightDetected) _uiState.value.readerState.currentPulseMs else 0L
-        if (_uiState.value.readerState.isReading) {
+        var symbols = state.readerState.decodedSymbols
+        var message = state.readerState.decodedMessage
+        var pulseMs = if (lightDetected) state.readerState.currentPulseMs else 0L
+        if (state.readerState.isReading) {
             val snapshot = readerDecoder.onSample(lightDetected, sample.timestampMs)
             symbols = snapshot.symbols
             message = snapshot.message
@@ -196,8 +210,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (shouldUpdateUi || _uiState.value.readerState.isReading) {
             _uiState.update {
                 val guide = when {
-                    !_uiState.value.readerState.isReading -> "先观察信号强度，确认光源稳定后再开始读取"
-                    lightDetected -> "已捕获亮灯信号，继续保持对准"
+                    !_uiState.value.readerState.isReading -> "先观察信号强度和建议阈值，确认稳定后再开始读取"
+                    lightDetected -> "已稳定捕获亮灯信号，继续保持对准"
+                    symbols.isBlank() && sample.signalStrength < sample.suggestedThreshold -> "光源偏弱，可把光源靠近或点自动校准"
                     symbols.isBlank() -> "等待下一次亮灯"
                     else -> "已读取到灯语，继续保持稳定直到结束"
                 }
@@ -205,6 +220,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     readerState = it.readerState.copy(
                         signalStrength = sample.signalStrength,
                         centerBrightness = sample.centerBrightness,
+                        surroundBrightness = sample.surroundBrightness,
+                        noiseFloor = sample.noiseFloor,
+                        suggestedThreshold = sample.suggestedThreshold,
                         lightDetected = lightDetected,
                         decodedSymbols = symbols,
                         decodedMessage = message,
@@ -475,12 +493,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         readerDecoder.reset()
         lastReaderLightDetected = false
         lastReaderUiSampleMs = 0L
+        pendingReaderLevel = false
+        pendingReaderLevelSinceMs = 0L
         if (clearUi) {
             _uiState.update {
                 it.copy(
                     readerState = it.readerState.copy(
                         signalStrength = 0f,
                         centerBrightness = 0f,
+                        surroundBrightness = 0f,
+                        noiseFloor = 0f,
                         lightDetected = false,
                         decodedSymbols = "",
                         decodedMessage = "",
@@ -506,5 +528,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             letterGapBoundaryMs = (gap * 2L).coerceAtLeast(250L),
             wordGapBoundaryMs = wordGap.coerceAtLeast(gap * 4L)
         )
+    }
+
+    private fun stabilizeReaderLevel(
+        signalStrength: Float,
+        threshold: Float,
+        timestampMs: Long
+    ): Boolean {
+        val onThreshold = threshold
+        val offThreshold = (threshold * 0.58f).coerceAtLeast(4f)
+        val targetLevel = when {
+            lastReaderLightDetected -> signalStrength > offThreshold
+            else -> signalStrength >= onThreshold
+        }
+
+        if (targetLevel == lastReaderLightDetected) {
+            pendingReaderLevel = targetLevel
+            pendingReaderLevelSinceMs = timestampMs
+            return lastReaderLightDetected
+        }
+
+        if (pendingReaderLevel != targetLevel) {
+            pendingReaderLevel = targetLevel
+            pendingReaderLevelSinceMs = timestampMs
+            return lastReaderLightDetected
+        }
+
+        val heldMs = timestampMs - pendingReaderLevelSinceMs
+        return if (heldMs >= readerTransitionHoldMs) {
+            pendingReaderLevel = targetLevel
+            pendingReaderLevelSinceMs = timestampMs
+            targetLevel
+        } else {
+            lastReaderLightDetected
+        }
     }
 }

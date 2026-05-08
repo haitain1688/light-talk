@@ -113,6 +113,7 @@ class MainActivity : ComponentActivity() {
                             onStartTorchWithAutoOff = viewModel::startTorchWithAutoOff,
                             onStopTorchNow = viewModel::stopTorchNow,
                             onReaderThresholdChange = viewModel::setReaderThreshold,
+                            onApplySuggestedReaderThreshold = viewModel::applySuggestedReaderThreshold,
                             onReaderStart = viewModel::startReadingLight,
                             onReaderStop = viewModel::stopReadingLight,
                             onReaderClear = viewModel::clearReaderResult,
@@ -165,6 +166,7 @@ private fun LampScreen(
     onStartTorchWithAutoOff: () -> Unit,
     onStopTorchNow: () -> Unit,
     onReaderThresholdChange: (Float) -> Unit,
+    onApplySuggestedReaderThreshold: () -> Unit,
     onReaderStart: () -> Unit,
     onReaderStop: () -> Unit,
     onReaderClear: () -> Unit,
@@ -220,6 +222,7 @@ private fun LampScreen(
             ReaderCard(
                 state = state,
                 onReaderThresholdChange = onReaderThresholdChange,
+                onApplySuggestedReaderThreshold = onApplySuggestedReaderThreshold,
                 onReaderStart = onReaderStart,
                 onReaderStop = onReaderStop,
                 onReaderClear = onReaderClear,
@@ -284,6 +287,7 @@ private fun PageSegmentedRow(
 private fun ReaderCard(
     state: LampUiState,
     onReaderThresholdChange: (Float) -> Unit,
+    onApplySuggestedReaderThreshold: () -> Unit,
     onReaderStart: () -> Unit,
     onReaderStop: () -> Unit,
     onReaderClear: () -> Unit,
@@ -303,6 +307,8 @@ private fun ReaderCard(
         ReaderMetricsPanel(
             signalStrength = readerState.signalStrength,
             centerBrightness = readerState.centerBrightness,
+            surroundBrightness = readerState.surroundBrightness,
+            noiseFloor = readerState.noiseFloor,
             lightDetected = readerState.lightDetected,
             pulseMs = readerState.currentPulseMs
         )
@@ -319,6 +325,14 @@ private fun ReaderCard(
             onValueChange = onReaderThresholdChange,
             valueRange = 5f..60f
         )
+        Text(
+            text = "建议阈值 ${readerState.suggestedThreshold.toInt()}，可先点击自动校准再开始读取",
+            color = Color(0xFF58677F)
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        SecondaryButton(onClick = onApplySuggestedReaderThreshold, modifier = Modifier.fillMaxWidth()) {
+            Text("自动校准阈值")
+        }
         Spacer(modifier = Modifier.height(10.dp))
         if (readerState.decodedSymbols.isNotBlank()) {
             PreviewPanel(title = "已读取灯语", text = readerState.decodedSymbols)
@@ -458,6 +472,8 @@ private fun CameraPreviewPanel(
 private fun ReaderMetricsPanel(
     signalStrength: Float,
     centerBrightness: Float,
+    surroundBrightness: Float,
+    noiseFloor: Float,
     lightDetected: Boolean,
     pulseMs: Long
 ) {
@@ -473,10 +489,24 @@ private fun ReaderMetricsPanel(
             modifier = Modifier.weight(1f)
         )
         MetricCard(
+            title = "周围亮度",
+            value = surroundBrightness.toInt().toString(),
+            modifier = Modifier.weight(1f)
+        )
+    }
+    Spacer(modifier = Modifier.height(10.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        MetricCard(
+            title = "噪声水平",
+            value = noiseFloor.toInt().toString(),
+            modifier = Modifier.weight(1f)
+        )
+        MetricCard(
             title = if (lightDetected) "已亮灯" else "未亮灯",
             value = "${pulseMs}ms",
             modifier = Modifier.weight(1f)
         )
+        Spacer(modifier = Modifier.weight(1f))
     }
 }
 
