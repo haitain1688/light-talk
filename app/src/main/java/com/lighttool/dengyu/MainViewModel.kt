@@ -5,8 +5,11 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lighttool.dengyu.data.AppPage
 import com.lighttool.dengyu.data.LampUiState
 import com.lighttool.dengyu.data.MessageMode
+import com.lighttool.dengyu.reader.CenterLightSample
+import com.lighttool.dengyu.reader.LightSignalDecoder
 import com.lighttool.dengyu.service.PatternCodec
 import com.lighttool.dengyu.service.TorchController
 import com.lighttool.dengyu.service.TorchPatternService
@@ -28,6 +31,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var autoOffCountdownJob: Job? = null
     private var patternStatusJob: Job? = null
     private val patternLoopGapMs = 1500L
+    private var readerDecoder = createReaderDecoder(200f, 600f, 200f, 700f)
 
     private val _uiState = MutableStateFlow(
         LampUiState(
@@ -40,6 +44,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     )
     val uiState: StateFlow<LampUiState> = _uiState.asStateFlow()
+    private var lastReaderLightDetected = false
+    private var lastReaderUiSampleMs = 0L
+
+    init {
+        readerDecoder = createReaderDecoder(
+            _uiState.value.shortOnMs,
+            _uiState.value.longOnMs,
+            _uiState.value.gapMs,
+            _uiState.value.wordGapMs
+        )
+    }
+
+    fun setCurrentPage(page: AppPage) {
+        _uiState.update { it.copy(currentPage = page) }
+    }
 
     fun toggleTorch() {
         if (!torchController.isFlashAvailable()) {
@@ -95,18 +114,108 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setShortOn(value: Float) {
         _uiState.update { it.copy(shortOnMs = value) }
+        resetReaderDecoder()
     }
 
     fun setLongOn(value: Float) {
         _uiState.update { it.copy(longOnMs = value) }
+        resetReaderDecoder()
     }
 
     fun setGap(value: Float) {
         _uiState.update { it.copy(gapMs = value) }
+        resetReaderDecoder()
     }
 
     fun setWordGap(value: Float) {
         _uiState.update { it.copy(wordGapMs = value) }
+        resetReaderDecoder()
+    }
+
+    fun setReaderThreshold(value: Float) {
+        _uiState.update {
+            it.copy(readerState = it.readerState.copy(detectionThreshold = value))
+        }
+    }
+
+    fun startReadingLight() {
+        resetReaderDecoder(clearUi = true)
+        _uiState.update {
+            it.copy(
+                currentPage = AppPage.READER,
+                readerState = it.readerState.copy(
+                    isReading = true,
+                    guideMessage = "读取中，请保持光源位于取景框中央"
+                ),
+                statusMessage = "读灯语模式已启动"
+            )
+        }
+    }
+
+    fun stopReadingLight() {
+        _uiState.update {
+            it.copy(
+                readerState = it.readerState.copy(
+                    isReading = false,
+                    currentPulseMs = 0L,
+                    guideMessage = "读取已停止，可重新开始或保留当前结果"
+                ),
+                statusMessage = "读灯语模式已停止"
+            )
+        }
+    }
+
+    fun clearReaderResult() {
+        resetReaderDecoder(clearUi = true)
+        _uiState.update {
+            it.copy(
+                readerState = it.readerState.copy(
+                    guideMessage = "结果已清空，请把光源对准取景框后重新开始"
+                ),
+                statusMessage = "读灯语结果已清空"
+            )
+        }
+    }
+
+    fun onReaderSample(sample: CenterLightSample) {
+        val threshold = _uiState.value.readerState.detectionThreshold
+        val lightDetected = sample.signalStrength >= threshold
+        val shouldUpdateUi = sample.timestampMs - lastReaderUiSampleMs >= 80L ||
+            lightDetected != lastReaderLightDetected
+
+        var symbols = _uiState.value.readerState.decodedSymbols
+        var message = _uiState.value.readerState.decodedMessage
+        var pulseMs = if (lightDetected) _uiState.value.readerState.currentPulseMs else 0L
+        if (_uiState.value.readerState.isReading) {
+            val snapshot = readerDecoder.onSample(lightDetected, sample.timestampMs)
+            symbols = snapshot.symbols
+            message = snapshot.message
+            pulseMs = snapshot.currentPulseMs
+        }
+
+        if (shouldUpdateUi || _uiState.value.readerState.isReading) {
+            _uiState.update {
+                val guide = when {
+                    !_uiState.value.readerState.isReading -> "先观察信号强度，确认光源稳定后再开始读取"
+                    lightDetected -> "已捕获亮灯信号，继续保持对准"
+                    symbols.isBlank() -> "等待下一次亮灯"
+                    else -> "已读取到灯语，继续保持稳定直到结束"
+                }
+                it.copy(
+                    readerState = it.readerState.copy(
+                        signalStrength = sample.signalStrength,
+                        centerBrightness = sample.centerBrightness,
+                        lightDetected = lightDetected,
+                        decodedSymbols = symbols,
+                        decodedMessage = message,
+                        guideMessage = guide,
+                        currentPulseMs = pulseMs
+                    )
+                )
+            }
+            lastReaderUiSampleMs = sample.timestampMs
+        }
+        lastReaderLightDetected = lightDetected
     }
 
     fun setRepeatCount(value: String) {
@@ -354,5 +463,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(statusMessage = message) }
         }
+    }
+
+    private fun resetReaderDecoder(clearUi: Boolean = false) {
+        readerDecoder = createReaderDecoder(
+            _uiState.value.shortOnMs,
+            _uiState.value.longOnMs,
+            _uiState.value.gapMs,
+            _uiState.value.wordGapMs
+        )
+        readerDecoder.reset()
+        lastReaderLightDetected = false
+        lastReaderUiSampleMs = 0L
+        if (clearUi) {
+            _uiState.update {
+                it.copy(
+                    readerState = it.readerState.copy(
+                        signalStrength = 0f,
+                        centerBrightness = 0f,
+                        lightDetected = false,
+                        decodedSymbols = "",
+                        decodedMessage = "",
+                        currentPulseMs = 0L
+                    )
+                )
+            }
+        }
+    }
+
+    private fun createReaderDecoder(
+        shortOnMs: Float?,
+        longOnMs: Float?,
+        gapMs: Float?,
+        wordGapMs: Float?
+    ): LightSignalDecoder {
+        val short = shortOnMs?.toLong() ?: 200L
+        val long = longOnMs?.toLong() ?: 600L
+        val gap = gapMs?.toLong() ?: 200L
+        val wordGap = wordGapMs?.toLong() ?: 700L
+        return LightSignalDecoder(
+            dotDashBoundaryMs = ((short + long) / 2L).coerceAtLeast(150L),
+            letterGapBoundaryMs = (gap * 2L).coerceAtLeast(250L),
+            wordGapBoundaryMs = wordGap.coerceAtLeast(gap * 4L)
+        )
     }
 }

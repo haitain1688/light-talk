@@ -15,7 +15,25 @@ enum class MessageMode {
     CUSTOM
 }
 
+enum class AppPage {
+    CONTROL,
+    READER
+}
+
+data class ReaderUiState(
+    val isReading: Boolean = false,
+    val signalStrength: Float = 0f,
+    val centerBrightness: Float = 0f,
+    val detectionThreshold: Float = 18f,
+    val lightDetected: Boolean = false,
+    val decodedSymbols: String = "",
+    val decodedMessage: String = "",
+    val guideMessage: String = "将光源对准取景框，先观察信号强度，再开始读取",
+    val currentPulseMs: Long = 0L
+)
+
 data class LampUiState(
+    val currentPage: AppPage = AppPage.CONTROL,
     val isTorchOn: Boolean = false,
     val flashingEnabled: Boolean = false,
     val isPatternSending: Boolean = false,
@@ -31,5 +49,6 @@ data class LampUiState(
     val longOnMs: Float = 600f,
     val gapMs: Float = 200f,
     val wordGapMs: Float = 700f,
+    val readerState: ReaderUiState = ReaderUiState(),
     val statusMessage: String = "准备就绪"
 )

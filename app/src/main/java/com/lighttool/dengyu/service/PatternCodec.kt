@@ -42,6 +42,7 @@ object PatternCodec {
         '8' to "---..",
         '9' to "----."
     )
+    private val reverseMorseMap = morseMap.entries.associate { (key, value) -> value to key }
 
     fun encode(
         raw: String,
@@ -124,5 +125,20 @@ object PatternCodec {
             }
             .joinToString(" ")
             .ifBlank { "..." }
+    }
+
+    fun decodeMorseSequence(raw: String): String {
+        return raw.trim()
+            .split(" ")
+            .filter { it.isNotBlank() }
+            .joinToString(separator = "") { token ->
+                if (token == "/") {
+                    " "
+                } else {
+                    reverseMorseMap[token]?.toString() ?: "?"
+                }
+            }
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 }
