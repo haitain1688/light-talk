@@ -83,20 +83,28 @@ class CenterLightAnalyzer(
             smoothedSurround = surroundAverage
             smoothedSignal = rawSignal
         } else {
-            smoothedCenter = smoothedCenter * 0.78f + centerAverage * 0.22f
-            smoothedSurround = smoothedSurround * 0.82f + surroundAverage * 0.18f
-            smoothedSignal = smoothedSignal * 0.70f + rawSignal * 0.30f
+            smoothedCenter = smoothedCenter * 0.72f + centerAverage * 0.28f
+            smoothedSurround = smoothedSurround * 0.78f + surroundAverage * 0.22f
+            smoothedSignal = smoothedSignal * 0.55f + rawSignal * 0.45f
         }
 
         val deviation = kotlin.math.abs(rawSignal - smoothedSignal)
-        noiseFloor = noiseFloor * 0.90f + deviation * 0.10f
-        val suggestedThreshold = (noiseFloor * 2.8f).coerceIn(8f, 60f)
+        noiseFloor = noiseFloor * 0.92f + deviation * 0.08f
+        val suggestedThreshold = maxOf(
+            noiseFloor * 3.4f,
+            12f
+        ).coerceIn(12f, 60f)
+        val responsiveSignal = if (rawSignal > smoothedSignal) {
+            rawSignal * 0.65f + smoothedSignal * 0.35f
+        } else {
+            smoothedSignal
+        }
 
         onSample(
             CenterLightSample(
                 centerBrightness = smoothedCenter,
                 surroundBrightness = smoothedSurround,
-                signalStrength = smoothedSignal,
+                signalStrength = responsiveSignal,
                 noiseFloor = noiseFloor,
                 suggestedThreshold = suggestedThreshold,
                 timestampMs = image.imageInfo.timestamp / 1_000_000L

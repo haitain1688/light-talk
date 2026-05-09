@@ -29,7 +29,7 @@ data class ReaderHistoryItem(
 
 data class ReaderUiState(
     val isReading: Boolean = false,
-    val autoStartEnabled: Boolean = true,
+    val autoStartEnabled: Boolean = false,
     val signalStrength: Float = 0f,
     val centerBrightness: Float = 0f,
     val surroundBrightness: Float = 0f,

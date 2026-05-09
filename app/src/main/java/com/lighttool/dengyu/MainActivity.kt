@@ -312,19 +312,8 @@ private fun ReaderCard(
             color = Color(0xFF58677F)
         )
         Spacer(modifier = Modifier.height(14.dp))
-        CameraPreviewPanel(onSample = onReaderSample)
-        Spacer(modifier = Modifier.height(14.dp))
-        ReaderMetricsPanel(
-            signalStrength = readerState.signalStrength,
-            centerBrightness = readerState.centerBrightness,
-            surroundBrightness = readerState.surroundBrightness,
-            noiseFloor = readerState.noiseFloor,
-            lightDetected = readerState.lightDetected,
-            pulseMs = readerState.currentPulseMs
-        )
-        Spacer(modifier = Modifier.height(14.dp))
-        PreviewPanel(title = "读取提示", text = readerState.guideMessage)
-        Spacer(modifier = Modifier.height(14.dp))
+        Text("读取参数", color = Color(0xFF102033), fontWeight = FontWeight.Medium)
+        Spacer(modifier = Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -366,7 +355,7 @@ private fun ReaderCard(
         SecondaryButton(onClick = onApplySuggestedReaderThreshold, modifier = Modifier.fillMaxWidth()) {
             Text("自动校准阈值")
         }
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         if (readerState.decodedSymbols.isNotBlank()) {
             PreviewPanel(title = "已读取灯语", text = readerState.decodedSymbols)
             Spacer(modifier = Modifier.height(10.dp))
@@ -380,9 +369,11 @@ private fun ReaderCard(
             color = Color(0xFF58677F)
         )
         Spacer(modifier = Modifier.height(12.dp))
+        CameraPreviewPanel(onSample = onReaderSample)
+        Spacer(modifier = Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (readerState.isReading) {
-                SecondaryButton(onClick = onReaderStop, modifier = Modifier.weight(1f)) {
+                PrimaryButton(onClick = onReaderStop, modifier = Modifier.weight(1f)) {
                     Text("停止读取")
                 }
             } else {
@@ -394,6 +385,17 @@ private fun ReaderCard(
                 Text("清空结果")
             }
         }
+        Spacer(modifier = Modifier.height(14.dp))
+        ReaderMetricsPanel(
+            signalStrength = readerState.signalStrength,
+            centerBrightness = readerState.centerBrightness,
+            surroundBrightness = readerState.surroundBrightness,
+            noiseFloor = readerState.noiseFloor,
+            lightDetected = readerState.lightDetected,
+            pulseMs = readerState.currentPulseMs
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        PreviewPanel(title = "读取提示", text = readerState.guideMessage)
         Spacer(modifier = Modifier.height(14.dp))
         ReaderHistorySection(
             history = readerState.history,

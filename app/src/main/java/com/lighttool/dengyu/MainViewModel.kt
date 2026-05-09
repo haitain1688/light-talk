@@ -34,8 +34,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var autoOffCountdownJob: Job? = null
     private var patternStatusJob: Job? = null
     private val patternLoopGapMs = 1500L
-    private val readerTransitionHoldMs = 90L
-    private val readerAutoStopDarkMs = 2200L
+    private val readerTransitionHoldMs = 55L
+    private val readerAutoStartHoldMs = 320L
+    private val readerAutoStartMargin = 6f
+    private val readerAutoStopDarkMs = 3200L
+    private val readerMinAutoCompleteMs = 1200L
     private val readerHistoryLimit = 12
     private var readerDecoder = createReaderDecoder(200f, 600f, 200f, 700f)
     private val readerTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
@@ -56,6 +59,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingReaderLevel = false
     private var pendingReaderLevelSinceMs = 0L
     private var lastReaderSignalTimestampMs = 0L
+    private var readerAutoStartCandidateSinceMs = 0L
+    private var readerSessionStartMs = 0L
+    private var readerSessionAutoStarted = false
 
     init {
         readerDecoder = createReaderDecoder(
@@ -150,10 +156,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun applySuggestedReaderThreshold() {
         _uiState.update {
-            val suggested = it.readerState.suggestedThreshold.coerceIn(6f, 60f)
+            val suggested = maxOf(
+                it.readerState.suggestedThreshold,
+                it.readerState.noiseFloor * 3.4f,
+                12f
+            ).coerceIn(12f, 60f)
             it.copy(
                 readerState = it.readerState.copy(detectionThreshold = suggested),
-                statusMessage = "已按当前环境自动校准识别阈值"
+                statusMessage = "已按当前环境设置更保守的识别阈值"
             )
         }
     }
@@ -215,9 +225,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         val threshold = state.readerState.detectionThreshold
         val lightDetected = stabilizeReaderLevel(sample.signalStrength, threshold, sample.timestampMs)
-        val isReading = maybeAutoStartReading(state, lightDetected, sample.timestampMs)
+        val isReading = maybeAutoStartReading(state, sample, lightDetected, sample.timestampMs)
         if (lightDetected) {
             lastReaderSignalTimestampMs = sample.timestampMs
+        }
+        if (isReading && readerSessionStartMs == 0L) {
+            readerSessionStartMs = sample.timestampMs
         }
 
         var symbols = _uiState.value.readerState.decodedSymbols
@@ -231,16 +244,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val shouldAutoFinish = isReading &&
+            readerSessionAutoStarted &&
             !lightDetected &&
             symbols.isNotBlank() &&
-            sample.timestampMs - lastReaderSignalTimestampMs >= readerAutoStopDarkMs
+            sample.timestampMs - lastReaderSignalTimestampMs >= readerAutoStopDarkMs &&
+            (readerSessionStartMs == 0L || sample.timestampMs - readerSessionStartMs >= readerMinAutoCompleteMs)
 
         if (shouldAutoFinish) {
             val completed = readerDecoder.complete(sample.timestampMs)
             symbols = completed.symbols
             message = completed.message
             pulseMs = 0L
-            appendReaderHistory(completed.symbols, completed.message)
+            val saved = appendReaderHistory(
+                symbols = completed.symbols,
+                message = completed.message,
+                requireMeaningfulResult = true
+            )
             _uiState.update {
                 it.copy(
                     readerState = it.readerState.copy(
@@ -248,9 +267,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         decodedSymbols = completed.symbols,
                         decodedMessage = completed.message,
                         currentPulseMs = 0L,
-                        guideMessage = "本次读取已自动完成，结果已保存到历史记录"
+                        guideMessage = if (saved) {
+                            "本次读取已自动完成，结果已保存到历史记录"
+                        } else {
+                            "本次读取已自动完成，但结果过短，未写入历史记录"
+                        }
                     ),
-                    statusMessage = "读灯语自动识别完成"
+                    statusMessage = if (saved) "读灯语自动识别完成" else "读灯语自动识别完成，已跳过过短结果"
                 )
             }
             resetReaderDecoder(clearUi = false)
@@ -263,16 +286,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (shouldUpdateUi || _uiState.value.readerState.isReading) {
             _uiState.update {
                 val guide = when {
-                    shouldAutoFinish -> "本次读取已自动完成，结果已保存到历史记录"
+                    shouldAutoFinish && symbols.isNotBlank() -> "本次读取已自动完成，请检查识别结果"
                     !it.readerState.isReading && it.readerState.autoStartEnabled && lightDetected ->
-                        "已检测到稳定光源，自动开始识别中"
+                        "已检测到亮灯，继续稳定保持后会自动开始"
                     !it.readerState.isReading && it.readerState.autoStartEnabled ->
                         "自动开始已开启，检测到稳定光源后会自动进入读取"
                     !it.readerState.isReading -> "自动开始已关闭，请手动点击开始读取"
                     lightDetected -> "已稳定捕获亮灯信号，继续保持对准"
+                    !readerSessionAutoStarted && symbols.isBlank() -> "手动读取中，未捕获到光源前不会自动停止"
                     symbols.isBlank() && sample.signalStrength < sample.suggestedThreshold -> "光源偏弱，可把光源靠近或点自动校准"
                     symbols.isBlank() -> "等待下一次亮灯"
-                    else -> "已读取到灯语，继续保持稳定直到自动完成"
+                    readerSessionAutoStarted -> "已读取到灯语，继续保持稳定直到自动完成"
+                    else -> "已读取到灯语，请继续读取或手动点停止"
                 }
                 it.copy(
                     readerState = it.readerState.copy(
@@ -541,8 +566,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun startReadingSession(autoStarted: Boolean) {
+    private fun startReadingSession(
+        autoStarted: Boolean,
+        startTimestampMs: Long = 0L
+    ) {
         resetReaderDecoder(clearUi = true)
+        readerSessionStartMs = startTimestampMs
+        readerSessionAutoStarted = autoStarted
         _uiState.update {
             it.copy(
                 currentPage = AppPage.READER,
@@ -551,7 +581,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     guideMessage = if (autoStarted) {
                         "已检测到稳定光源，自动开始识别中"
                     } else {
-                        "读取中，请保持光源位于取景框中央"
+                        "读取中，请保持光源位于取景框中央，未捕获到前不会自动停止"
                     }
                 ),
                 statusMessage = if (autoStarted) "已自动开始读灯语识别" else "读灯语模式已启动"
@@ -566,7 +596,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         val snapshot = readerDecoder.complete(System.currentTimeMillis())
         if (saveHistory) {
-            appendReaderHistory(snapshot.symbols, snapshot.message)
+            appendReaderHistory(snapshot.symbols, snapshot.message, requireMeaningfulResult = false)
         }
         _uiState.update {
             it.copy(
@@ -585,20 +615,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun maybeAutoStartReading(
         state: LampUiState,
+        sample: CenterLightSample,
         lightDetected: Boolean,
         timestampMs: Long
     ): Boolean {
-        if (!state.readerState.isReading && state.readerState.autoStartEnabled && lightDetected) {
-            lastReaderSignalTimestampMs = timestampMs
-            startReadingSession(autoStarted = true)
-            return true
+        if (!state.readerState.isReading && state.readerState.autoStartEnabled) {
+            val requiredSignal = maxOf(
+                state.readerState.detectionThreshold + readerAutoStartMargin,
+                sample.suggestedThreshold
+            )
+            val strongEnough = lightDetected && sample.signalStrength >= requiredSignal
+            if (strongEnough) {
+                if (readerAutoStartCandidateSinceMs == 0L) {
+                    readerAutoStartCandidateSinceMs = timestampMs
+                } else if (timestampMs - readerAutoStartCandidateSinceMs >= readerAutoStartHoldMs) {
+                    lastReaderSignalTimestampMs = timestampMs
+                    startReadingSession(autoStarted = true, startTimestampMs = timestampMs)
+                    return true
+                }
+            } else {
+                readerAutoStartCandidateSinceMs = 0L
+            }
         }
         return _uiState.value.readerState.isReading
     }
 
-    private fun appendReaderHistory(symbols: String, message: String) {
-        if (symbols.isBlank() && message.isBlank()) {
-            return
+    private fun appendReaderHistory(
+        symbols: String,
+        message: String,
+        requireMeaningfulResult: Boolean
+    ): Boolean {
+        if (!shouldSaveReaderHistory(symbols, message, requireMeaningfulResult)) {
+            return false
         }
         _uiState.update {
             val item = ReaderHistoryItem(
@@ -615,6 +663,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         }
+        return true
+    }
+
+    private fun shouldSaveReaderHistory(
+        symbols: String,
+        message: String,
+        requireMeaningfulResult: Boolean
+    ): Boolean {
+        if (symbols.isBlank() && message.isBlank()) {
+            return false
+        }
+        if (!requireMeaningfulResult) {
+            return true
+        }
+        val normalizedSymbols = symbols.trim()
+        val tokenCount = normalizedSymbols
+            .split(" ")
+            .count { token -> token.isNotBlank() && token != "/" }
+        val meaningfulMessage = message.replace(" ", "").replace("?", "")
+        val trivialSymbols = setOf(".", "-", "/", ". .", "- -")
+        return meaningfulMessage.length >= 2 ||
+            tokenCount >= 2 ||
+            normalizedSymbols !in trivialSymbols
     }
 
     private fun resetReaderDecoder(clearUi: Boolean = false) {
@@ -630,6 +701,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingReaderLevel = false
         pendingReaderLevelSinceMs = 0L
         lastReaderSignalTimestampMs = 0L
+        readerAutoStartCandidateSinceMs = 0L
+        readerSessionStartMs = 0L
+        readerSessionAutoStarted = false
         if (clearUi) {
             _uiState.update {
                 it.copy(
@@ -658,10 +732,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val long = longOnMs?.toLong() ?: 600L
         val gap = gapMs?.toLong() ?: 200L
         val wordGap = wordGapMs?.toLong() ?: 700L
+        val letterGap = (gap * 2L).coerceAtLeast(250L)
         return LightSignalDecoder(
             dotDashBoundaryMs = ((short + long) / 2L).coerceAtLeast(150L),
-            letterGapBoundaryMs = (gap * 2L).coerceAtLeast(250L),
-            wordGapBoundaryMs = wordGap.coerceAtLeast(gap * 4L)
+            letterGapBoundaryMs = letterGap,
+            wordGapBoundaryMs = maxOf(wordGap + gap, letterGap + gap * 2L),
+            minPulseMs = (short * 0.35f).toLong().coerceIn(45L, 120L)
         )
     }
 

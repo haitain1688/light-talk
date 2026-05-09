@@ -11,7 +11,8 @@ data class DecodeSnapshot(
 class LightSignalDecoder(
     private val dotDashBoundaryMs: Long,
     private val letterGapBoundaryMs: Long,
-    private val wordGapBoundaryMs: Long
+    private val wordGapBoundaryMs: Long,
+    private val minPulseMs: Long
 ) {
 
     private var hasStarted = false
@@ -74,6 +75,9 @@ class LightSignalDecoder(
     }
 
     private fun appendPulse(durationMs: Long) {
+        if (durationMs < minPulseMs) {
+            return
+        }
         currentToken.append(if (durationMs < dotDashBoundaryMs) '.' else '-')
     }
 
@@ -85,7 +89,8 @@ class LightSignalDecoder(
     }
 
     private fun appendWordGap() {
-        if (committedTokens.lastOrNull() != "/") {
+        val hasRealToken = committedTokens.any { it.isNotBlank() && it != "/" }
+        if (hasRealToken && committedTokens.lastOrNull() != "/") {
             committedTokens += "/"
         }
     }
@@ -97,10 +102,14 @@ class LightSignalDecoder(
                 add(currentToken.toString())
             }
         }
-        val symbols = previewTokens.joinToString(" ").trim()
+        val rawSymbols = previewTokens.joinToString(" ").trim()
+        val visibleSymbols = previewTokens
+            .filter { it.isNotBlank() && it != "/" }
+            .joinToString(" ")
+            .trim()
         return DecodeSnapshot(
-            symbols = symbols,
-            message = PatternCodec.decodeMorseSequence(symbols),
+            symbols = visibleSymbols,
+            message = PatternCodec.decodeMorseSequence(rawSymbols),
             currentPulseMs = (timestampMs - lastTransitionTimeMs).coerceAtLeast(0L)
         )
     }
